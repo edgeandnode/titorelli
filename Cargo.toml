@@ -1,0 +1,26 @@
+[package]
+name = "titorelli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.89"
+chrono = { version = "0.4.38", default-features = false, features = ["alloc"] }
+futures-util = "0.3.31"
+prost = "0.13.3"
+rdkafka = { version = "0.36.2", features = ["sasl", "tokio", "tracing"] }
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+snmalloc-rs = "0.3.6"
+tokio = { version = "1.40.0", features = [
+  "sync",
+  "macros",
+  "parking_lot",
+  "rt-multi-thread",
+  "time",
+] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = [
+  "env-filter",
+  "parking_lot",
+] }
