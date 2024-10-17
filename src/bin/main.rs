@@ -66,7 +66,8 @@ async fn run() -> anyhow::Result<()> {
     )?
     .create()?;
 
-    let start_timestamp = latest_sink_timestamp(&consumer).await?.unwrap_or(0);
+    let start_timestamp =
+        latest_sink_timestamp(&consumer).await?.unwrap_or(0) + AGGREGATION_INTERVAL_MILLIS;
     consumer.unassign().context("unassign sinks")?;
     tracing::info!(start_timestamp = print_unix_millis(start_timestamp)?);
 
