@@ -207,8 +207,9 @@ async fn record_aggregations(
             .collect(),
     }
     .encode_to_vec();
+    let key = timestamp.to_be_bytes();
     let record = rdkafka::producer::FutureRecord::to(SINK_TOPIC)
-        .key(&())
+        .key(&key)
         .payload(&record_payload);
     producer
         .send(record, Duration::from_secs(30))
