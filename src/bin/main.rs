@@ -119,6 +119,9 @@ async fn run() -> anyhow::Result<()> {
                             receiver,
                             fees_grt,
                         } => {
+                            if aggregation_timestamp < start_timestamp {
+                                continue;
+                            }
                             let key = IndexerFeesKey { signer, receiver };
                             let agg = aggregations.entry(aggregation_timestamp).or_default();
                             *agg.indexer_fees.entry(key).or_default() += fees_grt;
