@@ -92,9 +92,12 @@ async fn run() -> anyhow::Result<()> {
         .into_iter()
         .map(|e| (format!("{}/{}", e.topic(), e.partition()), 0))
         .collect();
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             biased;
+            _ = tokio::signal::ctrl_c() => anyhow::bail!("exit"),
+            _ = sigterm.recv() => anyhow::bail!("exit"),
             _ = consumer.recv() => anyhow::bail!("message received from split consumer"),
             _ = select_all(&mut partition_consumers) => anyhow::bail!("parition consumer exit"),
             _ = source_msg_rx.recv_many(&mut msg_buffer, msg_buffer_limit) => {
