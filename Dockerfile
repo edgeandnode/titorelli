@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
   libsasl2-dev \
   libssl-dev \
   pkg-config \
+  zlib1g-dev \
   && rm -rf /var/lib/apt/lists/*
 COPY . /src/
 WORKDIR /src/
