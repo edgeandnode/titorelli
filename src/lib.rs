@@ -1,4 +1,5 @@
 pub mod kafka;
+pub mod messages;
 
 use anyhow::Context as _;
 use chrono::DateTime;

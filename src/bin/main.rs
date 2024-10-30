@@ -3,12 +3,16 @@ use futures_util::{future::select_all, StreamExt as _};
 use prost::Message as _;
 use rdkafka::{
     consumer::{Consumer as _, DefaultConsumerContext, MessageStream, StreamConsumer},
-    producer::FutureProducer,
-    Message as _,
+    producer::{DefaultProducerContext, FutureProducer, ThreadedProducer},
+    Message as _, TopicPartitionList,
 };
 use serde::Deserialize;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
-use titorelli::print_unix_millis;
+use titorelli::{
+    kafka::{assign_partitions, fetch_partition_ids, latest_messages},
+    messages::{ClientQueryProtobuf, IndexerFeesHourlyProtobuf, IndexerFeesProtobuf},
+    print_unix_millis,
+};
 use tokio::{sync::mpsc, task::JoinHandle};
 
 #[global_allocator]
@@ -20,6 +24,8 @@ const AGGREGATION_INTERVAL_MILLIS: i64 = AGGREGATION_INTERVAL_MINUTES as i64 * 6
 #[derive(Deserialize)]
 struct Config {
     kafka: BTreeMap<String, String>,
+    #[serde(default)]
+    legacy_topics: bool,
 }
 
 #[tokio::main]
@@ -59,27 +65,58 @@ async fn run() -> anyhow::Result<()> {
     )?
     .create()?;
     let consumer = Arc::new(consumer);
-    let producer: rdkafka::producer::FutureProducer = titorelli::kafka::config_with(
+    let producer_config = titorelli::kafka::config_with(
         config.kafka.clone(),
         [("compression.codec", "gzip")],
         &["group.id"],
-    )?
-    .create()?;
+    )?;
+    let producer: rdkafka::producer::FutureProducer = producer_config.create()?;
+
+    let mut legacy_producer: Option<ThreadedProducer<DefaultProducerContext>> = None;
+    if config.legacy_topics {
+        legacy_producer = Some(producer_config.create()?);
+    }
 
     let start_timestamp =
         latest_sink_timestamp(&consumer).await?.unwrap_or(0) + AGGREGATION_INTERVAL_MILLIS;
     consumer.unassign().context("unassign sinks")?;
     tracing::info!(start_timestamp = print_unix_millis(start_timestamp)?);
 
-    let assignment =
-        titorelli::kafka::assign_partitions(&consumer, &[SOURCE_TOPIC], start_timestamp).await?;
+    // Legacy topic messages are not aggregations so they risk duplicating large amounts of data
+    // when we seek to start_timestamp. So we need to grab the committed offsets first to minimize
+    // the duplication.
+    let legacy_source_offsets: BTreeMap<i32, i64> = {
+        let mut partitions = TopicPartitionList::new();
+        for partition in fetch_partition_ids(consumer.client(), "gateway_queries")? {
+            partitions.add_partition("gateway_queries", partition);
+        }
+        consumer
+            .committed_offsets(partitions, Duration::from_secs(30))?
+            .elements()
+            .into_iter()
+            .filter_map(|e| Some((e.partition(), e.offset().to_raw()?)))
+            .collect()
+    };
+
+    let assignment = assign_partitions(
+        &consumer,
+        &["gateway_queries", "gateway_indexer_fees"],
+        start_timestamp,
+    )
+    .await?;
 
     let (source_msg_tx, mut source_msg_rx) = mpsc::channel::<SourceMsg>(1024);
     let mut partition_consumers: Vec<JoinHandle<()>> = assignment
         .elements()
         .into_iter()
         .map(|e| {
-            spawn_partition_consumer(&consumer, e.topic(), e.partition(), source_msg_tx.clone())
+            spawn_partition_consumer(
+                &consumer,
+                e.topic(),
+                e.partition(),
+                source_msg_tx.clone(),
+                legacy_source_offsets.clone(),
+            )
         })
         .collect();
     drop(source_msg_tx);
@@ -103,38 +140,99 @@ async fn run() -> anyhow::Result<()> {
             _ = source_msg_rx.recv_many(&mut msg_buffer, msg_buffer_limit) => {
                 anyhow::ensure!(!msg_buffer.is_empty(), "consumer channel closed");
                 for msg in msg_buffer.drain(..) {
-                    match msg {
-                        SourceMsg::Flush { partition_id, aggregation_timestamp } => {
-                            *flush_timestamps.get_mut(&partition_id).unwrap() = aggregation_timestamp;
-                            let min_timestamp = flush_timestamps.values().cloned().min().unwrap_or(0);
-                            while aggregations.first_key_value().map(|(k, _)| *k <= min_timestamp).unwrap_or(false) {
-                                let (t, agg) = aggregations.pop_first().unwrap();
-                                record_aggregations(&producer, t, agg).await?;
-                                tracing::info!(timestamp = print_unix_millis(t).unwrap(), "flushed");
-                            }
-                        }
-                        SourceMsg::IndexerFees {
-                            aggregation_timestamp,
-                            signer,
-                            receiver,
-                            fees_grt,
-                        } => {
-                            if aggregation_timestamp < start_timestamp {
-                                continue;
-                            }
-                            let key = IndexerFeesKey { signer, receiver };
-                            let agg = aggregations.entry(aggregation_timestamp).or_default();
-                            *agg.indexer_fees.entry(key).or_default() += fees_grt;
-                        }
-                    }
+                    handle_source_msg(
+                        &mut aggregations,
+                        &mut flush_timestamps,
+                        start_timestamp,
+                        &producer,
+                        msg,
+                        &legacy_producer,
+                    )
+                    .await?;
                 }
             }
         };
     }
 }
 
+async fn handle_source_msg(
+    aggregations: &mut BTreeMap<i64, Aggregations>,
+    flush_timestamps: &mut BTreeMap<String, i64>,
+    start_timestamp: i64,
+    producer: &FutureProducer,
+    msg: SourceMsg,
+    legacy_producer: &Option<ThreadedProducer<DefaultProducerContext>>,
+) -> anyhow::Result<()> {
+    match msg {
+        SourceMsg::Flush {
+            partition_id,
+            aggregation_timestamp,
+        } => {
+            *flush_timestamps.get_mut(&partition_id).unwrap() = aggregation_timestamp;
+            let min_timestamp = flush_timestamps.values().cloned().min().unwrap_or(0);
+            while aggregations
+                .first_key_value()
+                .map(|(k, _)| *k <= min_timestamp)
+                .unwrap_or(false)
+            {
+                let (t, agg) = aggregations.pop_first().unwrap();
+                record_aggregations(producer, t, agg).await?;
+                tracing::info!(timestamp = print_unix_millis(t).unwrap(), "flushed");
+            }
+        }
+        SourceMsg::IndexerFees {
+            aggregation_timestamp,
+            signer,
+            receiver,
+            fees_grt,
+        } => {
+            if aggregation_timestamp >= start_timestamp {
+                let key = IndexerFeesKey { signer, receiver };
+                let agg = aggregations.entry(aggregation_timestamp).or_default();
+                *agg.indexer_fees.entry(key).or_default() += fees_grt;
+            }
+        }
+        SourceMsg::ClientQuery {
+            timestamp,
+            aggregation_timestamp,
+            aggregation_only,
+            data,
+        } => {
+            if aggregation_timestamp >= start_timestamp {
+                for indexer_query in &data.indexer_queries {
+                    let key = IndexerFeesKey {
+                        signer: Address::from_slice(&data.receipt_signer)?,
+                        receiver: Address::from_slice(&indexer_query.indexer)?,
+                    };
+                    let agg = aggregations.entry(aggregation_timestamp).or_default();
+                    *agg.indexer_fees.entry(key).or_default() += indexer_query.fee_grt;
+                }
+            }
+
+            let legacy_producer = match legacy_producer {
+                Some(legacy_producer) if !aggregation_only => legacy_producer,
+                _ => return Ok(()),
+            };
+            let (client_query_result, indexer_attempts) = legacy_messages(timestamp, data);
+            let record_value = serde_json::to_vec(&client_query_result).unwrap();
+            let record = rdkafka::producer::BaseRecord::to("gateway_client_query_results")
+                .key(&())
+                .payload(&record_value);
+            legacy_producer.send(record).map_err(|(err, _)| err)?;
+            for indexer_attempt in indexer_attempts {
+                let record_value = serde_json::to_vec(&indexer_attempt).unwrap();
+                let record = rdkafka::producer::BaseRecord::to("gateway_indexer_attempts")
+                    .key(&())
+                    .payload(&record_value);
+                legacy_producer.send(record).map_err(|(err, _)| err)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn latest_sink_timestamp(consumer: &StreamConsumer) -> anyhow::Result<Option<i64>> {
-    let latest_messages = titorelli::kafka::latest_messages(consumer, &[SINK_TOPIC]).await?;
+    let latest_messages = latest_messages(consumer, &["gateway_indexer_fees_hourly"]).await?;
     let timestamp = latest_messages
         .into_iter()
         .map(|msg| -> anyhow::Result<i64> {
@@ -152,6 +250,7 @@ fn spawn_partition_consumer(
     topic: &str,
     partition: i32,
     source_msg_tx: mpsc::Sender<SourceMsg>,
+    legacy_source_offsets: BTreeMap<i32, i64>,
 ) -> JoinHandle<()> {
     let id = format!("{}/{}", topic, partition);
     let partition_queue = consumer.split_partition_queue(topic, partition).unwrap();
@@ -159,38 +258,46 @@ fn spawn_partition_consumer(
         id: String,
         mut stream: MessageStream<'_, DefaultConsumerContext>,
         source_msg_tx: mpsc::Sender<SourceMsg>,
+        legacy_source_offsets: BTreeMap<i32, i64>,
     ) -> anyhow::Result<()> {
         let mut last_aggregation_timestamp = 0;
         loop {
             let msg = stream.next().await.context("stream closed")??;
-            let msg = SourceMsg::decode(msg)?;
+            let msg = SourceMsg::decode(msg, &legacy_source_offsets)?;
             let aggregation_timestamp = match &msg {
-                SourceMsg::Flush { .. } => unreachable!(),
+                SourceMsg::Flush { .. } => unreachable!(), // unreachable
                 SourceMsg::IndexerFees {
+                    aggregation_timestamp,
+                    ..
+                }
+                | SourceMsg::ClientQuery {
                     aggregation_timestamp,
                     ..
                 } => *aggregation_timestamp,
             };
             let _ = source_msg_tx.send(msg).await;
-            if aggregation_timestamp > last_aggregation_timestamp {
-                // add a grace period to allow straggling messages to come in before flushing
-                let flush_msg = SourceMsg::Flush {
-                    partition_id: id.clone(),
-                    aggregation_timestamp: last_aggregation_timestamp,
-                };
-                let source_msg_tx = source_msg_tx.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    let _ = source_msg_tx.send(flush_msg).await;
-                });
 
-                last_aggregation_timestamp = aggregation_timestamp;
+            if aggregation_timestamp <= last_aggregation_timestamp {
+                continue;
             }
+            // add a grace period to allow straggling messages to come in before flushing
+            let flush_msg = SourceMsg::Flush {
+                partition_id: id.clone(),
+                aggregation_timestamp: last_aggregation_timestamp,
+            };
+            let source_msg_tx = source_msg_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                let _ = source_msg_tx.send(flush_msg).await;
+            });
+            last_aggregation_timestamp = aggregation_timestamp;
         }
     }
     tokio::spawn(async move {
         let stream = partition_queue.stream();
-        if let Err(err) = handle_stream(id.clone(), stream, source_msg_tx).await {
+        if let Err(err) =
+            handle_stream(id.clone(), stream, source_msg_tx, legacy_source_offsets).await
+        {
             tracing::error!("{:#}", err.context(id));
         }
     })
@@ -215,7 +322,7 @@ async fn record_aggregations(
     }
     .encode_to_vec();
     let key = timestamp.to_be_bytes();
-    let record = rdkafka::producer::FutureRecord::to(SINK_TOPIC)
+    let record = rdkafka::producer::FutureRecord::to("gateway_indexer_fees_hourly")
         .key(&key)
         .payload(&record_payload);
     producer
@@ -226,9 +333,6 @@ async fn record_aggregations(
 
     Ok(())
 }
-
-const SOURCE_TOPIC: &str = "gateway_indexer_fees";
-const SINK_TOPIC: &str = "gateway_indexer_fees_hourly";
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Address([u8; 20]);
@@ -262,42 +366,56 @@ enum SourceMsg {
         partition_id: String,
         aggregation_timestamp: i64,
     },
+    // TODO: remove after migration
     IndexerFees {
         aggregation_timestamp: i64,
         signer: Address,
         receiver: Address,
         fees_grt: f64,
     },
-}
-
-#[derive(prost::Message)]
-struct IndexerFeesProtobuf {
-    /// 20 bytes (address)
-    #[prost(bytes, tag = "1")]
-    signer: Vec<u8>,
-    /// 20 bytes (address)
-    #[prost(bytes, tag = "2")]
-    receiver: Vec<u8>,
-    #[prost(double, tag = "3")]
-    fees_grt: f64,
+    ClientQuery {
+        timestamp: i64,
+        aggregation_timestamp: i64,
+        aggregation_only: bool,
+        data: ClientQueryProtobuf,
+    },
 }
 
 impl SourceMsg {
-    fn decode(msg: rdkafka::message::BorrowedMessage) -> anyhow::Result<Self> {
-        anyhow::ensure!(msg.topic() == SOURCE_TOPIC);
+    fn decode(
+        msg: rdkafka::message::BorrowedMessage,
+        legacy_source_offsets: &BTreeMap<i32, i64>,
+    ) -> anyhow::Result<Self> {
         let timestamp = msg
             .timestamp()
             .to_millis()
             .ok_or_else(|| anyhow!("missing timestamp"))?;
-        let payload = msg.payload().context("missing payload")?;
-        let decoded = IndexerFeesProtobuf::decode(payload).context("decode protobuf")?;
         let aggregation_timestamp = timestamp - (timestamp % AGGREGATION_INTERVAL_MILLIS);
-        Ok(SourceMsg::IndexerFees {
-            aggregation_timestamp,
-            signer: Address::from_slice(&decoded.signer)?,
-            receiver: Address::from_slice(&decoded.receiver)?,
-            fees_grt: decoded.fees_grt,
-        })
+        let payload = msg.payload().context("missing payload")?;
+        match msg.topic() {
+            "gateway_queries" => {
+                let decoded = ClientQueryProtobuf::decode(payload).context("decode protobuf")?;
+                let aggregation_only =
+                    msg.offset() < *legacy_source_offsets.get(&msg.partition()).unwrap_or(&0);
+                Ok(SourceMsg::ClientQuery {
+                    timestamp,
+                    aggregation_timestamp,
+                    aggregation_only,
+                    data: decoded,
+                })
+            }
+            "gateway_indexer_fees" => {
+                let decoded = IndexerFeesProtobuf::decode(payload).context("decode protobuf")?;
+                let aggregation_timestamp = timestamp - (timestamp % AGGREGATION_INTERVAL_MILLIS);
+                Ok(SourceMsg::IndexerFees {
+                    aggregation_timestamp,
+                    signer: Address::from_slice(&decoded.signer)?,
+                    receiver: Address::from_slice(&decoded.receiver)?,
+                    fees_grt: decoded.fees_grt,
+                })
+            }
+            topic => anyhow::bail!("unexpected topic: {topic}"),
+        }
     }
 }
 
@@ -312,11 +430,99 @@ struct IndexerFeesKey {
     receiver: Address,
 }
 
-#[derive(prost::Message)]
-struct IndexerFeesHourlyProtobuf {
-    /// start timestamp for aggregation, in unix milliseconds
-    #[prost(int64, tag = "1")]
+pub fn legacy_messages(
     timestamp: i64,
-    #[prost(message, repeated, tag = "2")]
-    aggregations: Vec<IndexerFeesProtobuf>,
+    client_query: ClientQueryProtobuf,
+) -> (serde_json::Value, Vec<serde_json::Value>) {
+    let address_hex = |bytes| format!("{:?}", Address::from_slice(bytes).unwrap());
+    let deployment_str = |bytes| {
+        let mut buf = [0_u8; 34];
+        buf[0..2].copy_from_slice(&[0x12, 0x20]);
+        buf[2..].copy_from_slice(bytes);
+        bs58::encode(buf).into_string()
+    };
+    let first_indexer_query = client_query.indexer_queries.first();
+    let client_request_payload = serde_json::json!({
+        "gateway_id": address_hex(&client_query.receipt_signer),
+        "query_id": &client_query.query_id,
+        "ray_id": &client_query.query_id,
+        "network_chain": &client_query.gateway_id,
+        "graph_env": &client_query.gateway_id,
+        "timestamp": timestamp,
+        "api_key": &client_query.api_key,
+        "user": "0x0000000000000000000000000000000000000000",
+        "deployment": first_indexer_query.map(|i| deployment_str(&i.deployment)).unwrap_or_default(),
+        "indexed_chain": first_indexer_query.map(|i| i.indexed_chain.clone()).unwrap_or_default(),
+        "network": first_indexer_query.map(|i| i.indexed_chain.clone()).unwrap_or_default(),
+        "response_time_ms": client_query.response_time_ms,
+        "request_bytes": client_query.request_bytes,
+        "response_bytes": client_query.response_bytes,
+        "budget": 40e-6_f32,
+        "query_count": 1,
+        "fee": client_query.indexer_queries.iter().map(|i| i.fee_grt).sum::<f64>() as f32,
+        "fee_usd": client_query.total_fees_usd as f32,
+        "status": match &client_query.result {
+            r if r == "success" => "200 OK",
+            r if r.starts_with("bad indexers:") => "No suitable indexer found for subgraph deployment",
+            r if r.starts_with("block not found:") => "Unresolved block",
+            r if r.starts_with("internal error:") => "Internal error",
+            r if r.starts_with("auth error:") => "Invalid API key",
+            r if r.starts_with("bad query:") => "Invalid query",
+            r if r.starts_with("no indexers found") => "No indexers found for subgraph deployment",
+            r => r,
+        },
+        "status_code": match &client_query.result {
+            r if r == "success" => 0_u32,
+            r if r.starts_with("bad indexers:") => 510359393,
+            r if r.starts_with("block not found:") => 604610595,
+            r if r.starts_with("internal error:") => 816601499,
+            r if r.starts_with("auth error:") => 888904173,
+            r if r.starts_with("bad query:") => 595700117,
+            r if r.starts_with("no indexers found") => 1621366907,
+            r if r.starts_with("subgraph not found:") => 2599148187,
+            _ => 0,
+        },
+    });
+    let indexer_attempt_payloads = client_query
+        .indexer_queries
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "gateway_id": address_hex(&client_query.receipt_signer),
+                "query_id": &client_query.query_id,
+                "ray_id": &client_query.query_id,
+                "network_chain": &client_query.gateway_id,
+                "graph_env": &client_query.gateway_id,
+                "timestamp": timestamp,
+                "api_key": &client_query.api_key,
+                "user_address": "0x0000000000000000000000000000000000000000",
+                "deployment": deployment_str(&i.deployment),
+                "network": &i.indexed_chain,
+                "indexed_chain": &i.indexed_chain,
+                "indexer": address_hex(&i.indexer),
+                "url": &i.url,
+                "fee": i.fee_grt as f32,
+                "legacy_scalar": i.legacy_scalar,
+                "utility": 1.0,
+                "seconds_behind": i.seconds_behind,
+                "blocks_behind": i.blocks_behind,
+                "response_time_ms": i.response_time_ms,
+                "allocation": address_hex(&i.allocation),
+                "indexer_errors": &i.indexer_errors,
+                "status": match &i.result {
+                    r if r.contains("success") => "200 OK",
+                    r => r,
+                },
+                "status_code": match &i.result {
+                    r if r.contains("success") => 200_u32.to_be() & (u32::MAX >> 4),
+                    r if r.contains("Internal") => 0x1_u32 << 28,
+                    r if r.contains("Unavailable") => 0x2_u32 << 28,
+                    r if r.contains("Timeout") => 0x3_u32 << 28,
+                    r if r.contains("BadResponse") => 0x4_u32 << 28,
+                    _ => 0,
+                },
+            })
+        })
+        .collect();
+    (client_request_payload, indexer_attempt_payloads)
 }

@@ -9,6 +9,7 @@ path = "src/bin/main.rs"
 
 [dependencies]
 anyhow = "1.0.89"
+bs58 = "0.5.1"
 chrono = { version = "0.4.38", default-features = false, features = ["alloc"] }
 futures-util = "0.3.31"
 prost = "0.13.3"
