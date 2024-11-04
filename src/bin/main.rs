@@ -406,7 +406,6 @@ impl SourceMsg {
             }
             "gateway_indexer_fees" => {
                 let decoded = IndexerFeesProtobuf::decode(payload).context("decode protobuf")?;
-                let aggregation_timestamp = timestamp - (timestamp % AGGREGATION_INTERVAL_MILLIS);
                 Ok(SourceMsg::IndexerFees {
                     aggregation_timestamp,
                     signer: Address::from_slice(&decoded.signer)?,
