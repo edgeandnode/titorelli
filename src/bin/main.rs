@@ -183,6 +183,9 @@ async fn handle_source_msg(
         } => {
             if aggregation_timestamp >= start_timestamp {
                 for indexer_query in &data.indexer_queries {
+                    if indexer_query.legacy_scalar.unwrap_or(false) {
+                        continue;
+                    }
                     let key = IndexerFeesKey {
                         signer: Address::from_slice(&data.receipt_signer)?,
                         receiver: Address::from_slice(&indexer_query.indexer)?,

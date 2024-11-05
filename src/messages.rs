@@ -49,8 +49,8 @@ pub struct IndexerQueryProtobuf {
     pub indexer_errors: String,
     #[prost(uint64, tag = "11")]
     pub blocks_behind: u64,
-    #[prost(bool, tag = "12")]
-    pub legacy_scalar: bool,
+    #[prost(bool, optional, tag = "12")]
+    pub legacy_scalar: Option<bool>,
 }
 
 #[derive(prost::Message)]
