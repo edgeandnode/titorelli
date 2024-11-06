@@ -54,6 +54,27 @@ pub struct IndexerQueryProtobuf {
 }
 
 #[derive(prost::Message)]
+pub struct ClientFeesHourlyProtobuf {
+    /// start timestamp for aggregation, in unix milliseconds
+    #[prost(int64, tag = "1")]
+    pub timestamp: i64,
+    #[prost(message, repeated, tag = "2")]
+    pub aggregations: Vec<ClientFeesProtobuf>,
+}
+
+#[derive(prost::Message)]
+pub struct ClientFeesProtobuf {
+    #[prost(string, tag = "1")]
+    pub api_key: String,
+    #[prost(string, tag = "2")]
+    pub deployment: String,
+    #[prost(double, tag = "3")]
+    pub fees_grt: f64,
+    #[prost(double, tag = "4")]
+    pub fees_usd: f64,
+}
+
+#[derive(prost::Message)]
 pub struct IndexerFeesHourlyProtobuf {
     /// start timestamp for aggregation, in unix milliseconds
     #[prost(int64, tag = "1")]
