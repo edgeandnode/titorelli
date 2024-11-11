@@ -240,8 +240,16 @@ async fn latest_sink_timestamp(consumer: &StreamConsumer) -> anyhow::Result<Opti
     let timestamp = latest_messages
         .into_iter()
         .map(|msg| -> anyhow::Result<i64> {
-            let msg = IndexerFeesHourlyProtobuf::decode(msg.payload().context("missing payload")?)?;
-            Ok(msg.timestamp)
+            let payload = msg.payload().context("missing_payload")?;
+            match msg.topic() {
+                "gateway_client_fees_hourly" => {
+                    Ok(ClientFeesHourlyProtobuf::decode(payload)?.timestamp)
+                }
+                "gateway_indexer_fees_hourly" => {
+                    Ok(IndexerFeesHourlyProtobuf::decode(payload)?.timestamp)
+                }
+                topic => anyhow::bail!("unhandled topic: {topic}"),
+            }
         })
         .collect::<anyhow::Result<Vec<i64>>>()?
         .into_iter()
