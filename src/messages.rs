@@ -9,6 +9,8 @@ pub struct ClientQueryProtobuf {
     pub query_id: String,
     #[prost(string, tag = "4")]
     pub api_key: String,
+    #[prost(string, optional, tag = "11")]
+    pub user_id: Option<String>,
     #[prost(string, tag = "5")]
     pub result: String,
     #[prost(uint32, tag = "6")]
@@ -22,6 +24,7 @@ pub struct ClientQueryProtobuf {
     #[prost(message, repeated, tag = "10")]
     pub indexer_queries: Vec<IndexerQueryProtobuf>,
 }
+
 #[derive(prost::Message)]
 pub struct IndexerQueryProtobuf {
     /// 20 bytes (address)
@@ -65,13 +68,23 @@ pub struct ClientFeesHourlyProtobuf {
 #[derive(prost::Message)]
 pub struct ClientFeesProtobuf {
     #[prost(string, tag = "1")]
-    pub api_key: String,
+    pub gateway_id: String,
     #[prost(string, tag = "2")]
+    pub user_id: String,
+    #[prost(string, tag = "3")]
+    pub api_key: String,
+    #[prost(string, tag = "4")]
     pub deployment: String,
-    #[prost(double, tag = "3")]
+    #[prost(double, tag = "5")]
     pub fees_grt: f64,
-    #[prost(double, tag = "4")]
+    #[prost(double, tag = "6")]
     pub fees_usd: f64,
+    #[prost(uint32, tag = "7")]
+    pub query_count: u32,
+    #[prost(float, tag = "8")]
+    pub success_rate: f32,
+    #[prost(uint32, tag = "9")]
+    pub avg_response_time_ms: u32,
 }
 
 #[derive(prost::Message)]

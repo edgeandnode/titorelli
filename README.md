@@ -13,10 +13,15 @@ aggregations into the following topics:
   syntax = "proto3";
   message ClientFeesHourly {
     message ClientFees {
-      string api_key = 1;
-      string deployment = 2;
-      double fees_grt = 3;
-      double fees_usd = 4;
+      string gateway_id = 1;
+      string user_id = 2;
+      string api_key = 3;
+      string deployment = 4;
+      double fees_grt = 5;
+      double fees_usd = 6;
+      uint32 query_count = 7;
+      float success_rate = 8;
+      uint32 avg_response_time_ms = 9;
     }
     // start timestamp for aggregation, in unix milliseconds
     int64 timestamp = 1;
@@ -36,7 +41,7 @@ aggregations into the following topics:
       bytes receiver = 2;
       double fees_grt = 3;
     }
-    /// start timestamp for aggregation, in unix milliseconds
+    // start timestamp for aggregation, in unix milliseconds
     int64 timestamp = 1;
     repeated IndexerFees aggregations = 2;
   }
