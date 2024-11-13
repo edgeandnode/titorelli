@@ -190,6 +190,7 @@ async fn handle_source_msg(
                 if let Some(deployment) = data.indexer_queries.first().map(|i| &i.deployment) {
                     let key = ClientFeesKey {
                         gateway_id: data.gateway_id.clone(),
+                        user_id: data.user_id.clone().unwrap_or_default(),
                         api_key: data.api_key.clone(),
                         deployment: deployment_cid(deployment),
                     };
@@ -336,7 +337,7 @@ async fn record_aggregations(
                 let query_count = (v.success_count + v.failure_count).max(1) as f64;
                 ClientFeesProtobuf {
                     gateway_id: k.gateway_id,
-                    user_id: v.user_id,
+                    user_id: k.user_id,
                     api_key: k.api_key,
                     deployment: k.deployment,
                     fees_grt: v.fees_grt,
@@ -466,13 +467,13 @@ struct Aggregations {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ClientFeesKey {
     gateway_id: String,
+    user_id: String,
     api_key: String,
     deployment: String,
 }
 
 #[derive(Debug, Default)]
 struct ClientFeesValue {
-    user_id: String,
     fees_grt: f64,
     fees_usd: f64,
     success_count: u32,
