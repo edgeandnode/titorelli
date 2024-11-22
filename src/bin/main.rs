@@ -511,7 +511,7 @@ pub fn legacy_messages(
         "response_time_ms": client_query.response_time_ms,
         "request_bytes": client_query.request_bytes,
         "response_bytes": client_query.response_bytes,
-        "budget": 40e-6_f32,
+        "budget": 40e-6_f32.to_string(),
         "query_count": 1,
         "fee": client_query.indexer_queries.iter().map(|i| i.fee_grt).sum::<f64>() as f32,
         "fee_usd": client_query.total_fees_usd as f32,
