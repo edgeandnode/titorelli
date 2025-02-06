@@ -205,9 +205,6 @@ async fn handle_source_msg(
                 }
 
                 for indexer_query in &data.indexer_queries {
-                    if indexer_query.legacy_scalar.unwrap_or(false) {
-                        continue;
-                    }
                     let key = IndexerFeesKey {
                         signer: Address::from_slice(&data.receipt_signer)?,
                         receiver: Address::from_slice(&indexer_query.indexer)?,
@@ -556,7 +553,7 @@ pub fn legacy_messages(
                 "indexer": address_hex(&i.indexer),
                 "url": &i.url,
                 "fee": i.fee_grt as f32,
-                "legacy_scalar": i.legacy_scalar,
+                "legacy_scalar": false,
                 "utility": 1.0,
                 "seconds_behind": i.seconds_behind,
                 "blocks_behind": i.blocks_behind,
