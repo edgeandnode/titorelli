@@ -413,6 +413,7 @@ fn deployment_cid(bytes: &[u8]) -> String {
     bs58::encode(buf).into_string()
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum SourceMsg {
     Flush {
@@ -503,6 +504,7 @@ pub fn legacy_messages(
         "api_key": &client_query.api_key,
         "user": &user_id,
         "deployment": first_indexer_query.map(|i| deployment_cid(&i.deployment)).unwrap_or_default(),
+        "subgraph": &client_query.subgraph,
         "indexed_chain": first_indexer_query.map(|i| i.indexed_chain.clone()).unwrap_or_default(),
         "network": first_indexer_query.map(|i| i.indexed_chain.clone()).unwrap_or_default(),
         "response_time_ms": client_query.response_time_ms,

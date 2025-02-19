@@ -11,6 +11,8 @@ pub struct ClientQueryProtobuf {
     pub api_key: String,
     #[prost(string, optional, tag = "11")]
     pub user_id: Option<String>,
+    #[prost(string, optional, tag = "12")]
+    pub subgraph: Option<String>,
     #[prost(string, tag = "5")]
     pub result: String,
     #[prost(uint32, tag = "6")]
