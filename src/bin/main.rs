@@ -12,7 +12,8 @@ use titorelli::{
     kafka::{assign_partitions, fetch_partition_ids, latest_messages},
     messages::{
         ClientFeesHourlyProtobuf, ClientFeesProtobuf, ClientQueryProtobuf,
-        IndexerFeesHourlyProtobuf, IndexerFeesProtobuf,
+        IndexerFeesHourlyProtobuf, IndexerFeesProtobuf, IndexerQosHourlyProtobuf,
+        IndexerQosProtobuf,
     },
     print_unix_millis,
 };
@@ -211,6 +212,32 @@ async fn handle_source_msg(
                     };
                     *agg.indexer_fees.entry(key).or_default() += indexer_query.fee_grt;
                 }
+
+                for indexer_query in &data.indexer_queries {
+                    let key = IndexerQosKey {
+                        indexer: Address::from_slice(&indexer_query.allocation)?,
+                        deployment: deployment_cid(&indexer_query.deployment),
+                    };
+                    let value = agg
+                        .indexer_qos
+                        .entry(key)
+                        .or_insert_with(|| IndexerQosValue {
+                            chain: indexer_query.indexed_chain.clone(),
+                            success_count: 0,
+                            failure_count: 0,
+                            total_seconds_behind: 0,
+                            total_latency_ms: 0,
+                            total_fee_grt: 0.0,
+                        });
+                    if indexer_query.result == "success" {
+                        value.success_count += 1;
+                    } else {
+                        value.failure_count += 1;
+                    }
+                    value.total_seconds_behind += indexer_query.seconds_behind as u64;
+                    value.total_latency_ms += indexer_query.response_time_ms as u64;
+                    value.total_fee_grt += indexer_query.fee_grt;
+                }
             }
 
             let legacy_producer = match legacy_producer {
@@ -324,6 +351,7 @@ async fn record_aggregations(
     let Aggregations {
         client_fees,
         indexer_fees,
+        indexer_qos,
     } = aggregations;
 
     let record_payload = ClientFeesHourlyProtobuf {
@@ -377,10 +405,39 @@ async fn record_aggregations(
         .map_err(|(err, _)| err)
         .context("send aggregation record")?;
 
+    let record_payload = IndexerQosHourlyProtobuf {
+        timestamp,
+        aggregations: indexer_qos
+            .into_iter()
+            .map(|(k, v)| {
+                let total_queries = (v.success_count + v.failure_count) as f64;
+                IndexerQosProtobuf {
+                    indexer: k.indexer.0.to_vec(),
+                    deployment: k.deployment,
+                    chain: v.chain,
+                    success_count: v.success_count,
+                    failure_count: v.failure_count,
+                    avg_seconds_behind: (v.total_seconds_behind as f64 / total_queries) as u64,
+                    avg_latency_ms: (v.total_latency_ms as f64 / total_queries) as u32,
+                    avg_fee_grt: (v.total_fee_grt / total_queries),
+                }
+            })
+            .collect(),
+    }
+    .encode_to_vec();
+    let record = rdkafka::producer::FutureRecord::to("gateway_indexer_qos_hourly")
+        .key(&record_key)
+        .payload(&record_payload);
+    producer
+        .send(record, Duration::from_secs(30))
+        .await
+        .map_err(|(err, _)| err)
+        .context("send aggregation record")?;
+
     Ok(())
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Address([u8; 20]);
 
 impl Address {
@@ -460,6 +517,7 @@ impl SourceMsg {
 struct Aggregations {
     client_fees: BTreeMap<ClientFeesKey, ClientFeesValue>,
     indexer_fees: BTreeMap<IndexerFeesKey, f64>,
+    indexer_qos: BTreeMap<IndexerQosKey, IndexerQosValue>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -483,6 +541,22 @@ struct ClientFeesValue {
 struct IndexerFeesKey {
     signer: Address,
     receiver: Address,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexerQosKey {
+    indexer: Address,
+    deployment: String,
+}
+
+#[derive(Debug)]
+struct IndexerQosValue {
+    chain: String,
+    success_count: u32,
+    failure_count: u32,
+    total_seconds_behind: u64,
+    total_latency_ms: u64,
+    total_fee_grt: f64,
 }
 
 pub fn legacy_messages(

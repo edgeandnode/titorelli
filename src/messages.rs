@@ -107,3 +107,33 @@ pub struct IndexerFeesProtobuf {
     #[prost(double, tag = "3")]
     pub fees_grt: f64,
 }
+
+#[derive(prost::Message)]
+pub struct IndexerQosHourlyProtobuf {
+    /// start timestamp for aggregation, in unix milliseconds
+    #[prost(int64, tag = "1")]
+    pub timestamp: i64,
+    #[prost(message, repeated, tag = "2")]
+    pub aggregations: Vec<IndexerQosProtobuf>,
+}
+
+#[derive(prost::Message)]
+pub struct IndexerQosProtobuf {
+    /// 20 bytes (address)
+    #[prost(bytes, tag = "1")]
+    pub indexer: Vec<u8>,
+    #[prost(string, tag = "2")]
+    pub deployment: String,
+    #[prost(string, tag = "3")]
+    pub chain: String,
+    #[prost(uint32, tag = "4")]
+    pub success_count: u32,
+    #[prost(uint32, tag = "5")]
+    pub failure_count: u32,
+    #[prost(uint64, tag = "6")]
+    pub avg_seconds_behind: u64,
+    #[prost(uint32, tag = "7")]
+    pub avg_latency_ms: u32,
+    #[prost(double, tag = "8")]
+    pub avg_fee_grt: f64,
+}
