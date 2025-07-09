@@ -295,7 +295,7 @@ fn spawn_partition_consumer(
     source_msg_tx: mpsc::Sender<SourceMsg>,
     legacy_source_offsets: BTreeMap<i32, i64>,
 ) -> JoinHandle<()> {
-    let id = format!("{}/{}", topic, partition);
+    let id = format!("{topic}/{partition}");
     let partition_queue = consumer.split_partition_queue(topic, partition).unwrap();
     async fn handle_stream(
         id: String,
