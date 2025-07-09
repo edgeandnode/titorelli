@@ -47,6 +47,28 @@ aggregations into the following topics:
   }
   ```
 
+- `gateway_indexer_qos_hourly`
+
+  ```protobuf
+  syntax = "proto3";
+  message IndexerQosHourly {
+    message IndexerQos {
+      /// 20 bytes (address)
+      bytes indexer = 1;
+      string deployment = 2;
+      string chain = 3;
+      uint32 success_count = 4;
+      uint32 failure_count = 5;
+      uint64 avg_seconds_behind = 6;
+      uint32 avg_latency_ms = 7;
+      double avg_fee_grt = 8;
+    }
+    /// start timestamp for aggregation; in unix milliseconds
+    int64 timestamp = 1;
+    repeated IndexerQos aggregations = 2;
+  }
+  ```
+
 ## example configuration
 
 ```json
